@@ -99,7 +99,7 @@ export async function startServer(): Promise<StartedServer> {
       process.env.PAPERCLIP_SECRETS_MASTER_KEY = generatedKey;
       logger.warn(
         { path: autoKeyPath },
-        "No PAPERCLIP_SECRETS_MASTER_KEY set; generated an ephemeral key. Set PAPERCLIP_SECRETS_MASTER_KEY to make secrets persistent across restarts.",
+        "No PAPERCLIP_SECRETS_MASTER_KEY set; generated and saved a key to disk. Set PAPERCLIP_SECRETS_MASTER_KEY in production to manage the key independently of the data directory.",
       );
     }
   }

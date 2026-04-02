@@ -104,7 +104,15 @@ export async function createApp(
     }),
   );
 
-  const effectiveAllowedOrigins = opts.allowedOrigins ?? [];
+  const effectiveAllowedOrigins = (opts.allowedOrigins ?? []).filter((origin) => {
+    // Only allow exact http(s) origins — reject wildcards or non-URL values.
+    try {
+      const parsed = new URL(origin);
+      return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "*";
+    } catch {
+      return false;
+    }
+  });
   if (effectiveAllowedOrigins.length > 0) {
     const corsOptions: cors.CorsOptions = {
       origin: effectiveAllowedOrigins,
