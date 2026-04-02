@@ -811,9 +811,8 @@ export function IssueDetail() {
   const copyIssueToClipboard = async () => {
     if (!issue) return;
     const decodeEntities = (text: string) => {
-      const el = document.createElement("textarea");
-      el.innerHTML = text;
-      return el.value;
+      const doc = new DOMParser().parseFromString(text, "text/html");
+      return doc.documentElement.textContent ?? text;
     };
     const title = decodeEntities(issue.title);
     const body = decodeEntities(issue.description ?? "");

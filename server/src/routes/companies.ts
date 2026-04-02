@@ -1,4 +1,5 @@
 import { Router, type Request } from "express";
+import express from "express";
 import type { Db } from "@paperclipai/db";
 import {
   companyPortabilityExportSchema,
@@ -160,7 +161,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     res.json(result);
   });
 
-  router.post("/:companyId/imports/preview", validate(companyPortabilityPreviewSchema), async (req, res) => {
+  router.post("/:companyId/imports/preview", express.json({ limit: "10mb" }), validate(companyPortabilityPreviewSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanManagePortability(req, companyId, "imports");
     if (req.body.target.mode === "existing_company" && req.body.target.companyId !== companyId) {
@@ -176,7 +177,7 @@ export function companyRoutes(db: Db, storage?: StorageService) {
     res.json(preview);
   });
 
-  router.post("/:companyId/imports/apply", validate(companyPortabilityImportSchema), async (req, res) => {
+  router.post("/:companyId/imports/apply", express.json({ limit: "10mb" }), validate(companyPortabilityImportSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
     await assertCanManagePortability(req, companyId, "imports");
     if (req.body.target.mode === "existing_company" && req.body.target.companyId !== companyId) {

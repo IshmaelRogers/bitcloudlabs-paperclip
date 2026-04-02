@@ -1,7 +1,8 @@
 /// <reference path="./types/express.d.ts" />
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { resolve } from "node:path";
+import { randomBytes } from "node:crypto";
 import { createInterface } from "node:readline/promises";
 import { stdin, stdout } from "node:process";
 import { pathToFileURL } from "node:url";
@@ -81,6 +82,26 @@ export async function startServer(): Promise<StartedServer> {
   }
   if (process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE === undefined) {
     process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE = config.secretsMasterKeyFilePath;
+  }
+
+  // Ensure a secrets master key exists when using local_encrypted provider.
+  if (
+    config.secretsProvider === "local_encrypted" &&
+    !process.env.PAPERCLIP_SECRETS_MASTER_KEY &&
+    !process.env.PAPERCLIP_SECRETS_MASTER_KEY_FILE
+  ) {
+    const autoKeyPath = resolve(config.embeddedPostgresDataDir, "../secrets-master.key");
+    if (existsSync(autoKeyPath)) {
+      process.env.PAPERCLIP_SECRETS_MASTER_KEY = readFileSync(autoKeyPath, "utf-8").trim();
+    } else {
+      const generatedKey = randomBytes(32).toString("hex");
+      writeFileSync(autoKeyPath, generatedKey, { mode: 0o600 });
+      process.env.PAPERCLIP_SECRETS_MASTER_KEY = generatedKey;
+      logger.warn(
+        { path: autoKeyPath },
+        "No PAPERCLIP_SECRETS_MASTER_KEY set; generated an ephemeral key. Set PAPERCLIP_SECRETS_MASTER_KEY to make secrets persistent across restarts.",
+      );
+    }
   }
   
   type MigrationSummary =
@@ -274,6 +295,16 @@ export async function startServer(): Promise<StartedServer> {
     const dataDir = resolve(config.embeddedPostgresDataDir);
     const configuredPort = config.embeddedPostgresPort;
     let port = configuredPort;
+
+    // Load or generate a stable password for the embedded PostgreSQL instance.
+    const pgPasswordFile = resolve(dataDir, "../embedded-pg-password");
+    let embeddedPgPassword: string;
+    if (existsSync(pgPasswordFile)) {
+      embeddedPgPassword = readFileSync(pgPasswordFile, "utf-8").trim();
+    } else {
+      embeddedPgPassword = randomBytes(16).toString("hex");
+      writeFileSync(pgPasswordFile, embeddedPgPassword, { mode: 0o600 });
+    }
     const logBuffer = createEmbeddedPostgresLogBuffer(120);
     const verboseEmbeddedPostgresLogs = process.env.PAPERCLIP_EMBEDDED_POSTGRES_VERBOSE === "true";
     const appendEmbeddedPostgresLog = (message: unknown) => {
@@ -339,7 +370,7 @@ export async function startServer(): Promise<StartedServer> {
     if (runningPid) {
       logger.warn(`Embedded PostgreSQL already running; reusing existing process (pid=${runningPid}, port=${port})`);
     } else {
-      const configuredAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${configuredPort}/postgres`;
+      const configuredAdminConnectionString = `postgres://paperclip:${embeddedPgPassword}@127.0.0.1:${configuredPort}/postgres`;
       try {
         const actualDataDir = await getPostgresDataDirectory(configuredAdminConnectionString);
         if (
@@ -362,7 +393,7 @@ export async function startServer(): Promise<StartedServer> {
         embeddedPostgres = new EmbeddedPostgres({
           databaseDir: dataDir,
           user: "paperclip",
-          password: "paperclip",
+          password: embeddedPgPassword,
           port,
           persistent: true,
           initdbFlags: ["--encoding=UTF8", "--locale=C", "--lc-messages=C"],
@@ -401,13 +432,13 @@ export async function startServer(): Promise<StartedServer> {
       }
     }
   
-    const embeddedAdminConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/postgres`;
+    const embeddedAdminConnectionString = `postgres://paperclip:${embeddedPgPassword}@127.0.0.1:${port}/postgres`;
     const dbStatus = await ensurePostgresDatabase(embeddedAdminConnectionString, "paperclip");
     if (dbStatus === "created") {
       logger.info("Created embedded PostgreSQL database: paperclip");
     }
   
-    const embeddedConnectionString = `postgres://paperclip:paperclip@127.0.0.1:${port}/paperclip`;
+    const embeddedConnectionString = `postgres://paperclip:${embeddedPgPassword}@127.0.0.1:${port}/paperclip`;
     const shouldAutoApplyFirstRunMigrations = !clusterAlreadyInitialized || dbStatus === "created";
     if (shouldAutoApplyFirstRunMigrations) {
       logger.info("Detected first-run embedded PostgreSQL setup; applying pending migrations automatically");
@@ -456,6 +487,7 @@ export async function startServer(): Promise<StartedServer> {
   let resolveSessionFromHeaders:
     | ((headers: Headers) => Promise<BetterAuthSessionResult | null>)
     | undefined;
+  let effectiveTrustedOrigins: string[] = [];
   if (config.deploymentMode === "local_trusted") {
     await ensureLocalTrustedBoardPrincipal(db as any);
   }
@@ -479,7 +511,7 @@ export async function startServer(): Promise<StartedServer> {
       .split(",")
       .map((value) => value.trim())
       .filter((value) => value.length > 0);
-    const effectiveTrustedOrigins = Array.from(new Set([...derivedTrustedOrigins, ...envTrustedOrigins]));
+    effectiveTrustedOrigins = Array.from(new Set([...derivedTrustedOrigins, ...envTrustedOrigins]));
     logger.info(
       {
         authBaseUrlMode: config.authBaseUrlMode,
@@ -523,6 +555,7 @@ export async function startServer(): Promise<StartedServer> {
     deploymentMode: config.deploymentMode,
     deploymentExposure: config.deploymentExposure,
     allowedHostnames: config.allowedHostnames,
+    allowedOrigins: effectiveTrustedOrigins,
     bindHost: config.host,
     authReady,
     companyDeletionEnabled: config.companyDeletionEnabled,
