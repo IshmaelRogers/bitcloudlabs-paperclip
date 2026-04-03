@@ -4,6 +4,7 @@ import {
   randomBytes,
   timingSafeEqual
 } from "node:crypto";
+import net from "node:net";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1501,10 +1502,41 @@ type InviteResolutionProbe = {
   message: string;
 };
 
+function isPrivateHost(hostname: string): boolean {
+  const h = hostname.trim().toLowerCase().replace(/^\[|\]$/g, ""); // strip brackets from IPv6
+  // Named loopback aliases
+  if (h === "localhost" || h === "ip6-localhost" || h === "ip6-loopback") return true;
+  const ipVersion = net.isIP(h);
+  if (ipVersion === 4) {
+    // Loopback: 127.0.0.0/8
+    if (/^127\./.test(h)) return true;
+    // Unspecified: 0.0.0.0/8
+    if (/^0\./.test(h)) return true;
+    // RFC-1918 private ranges
+    if (/^10\./.test(h)) return true;
+    if (/^192\.168\./.test(h)) return true;
+    if (/^172\.(1[6-9]|2\d|3[01])\./.test(h)) return true;
+    // Link-local / cloud metadata (169.254.0.0/16)
+    if (/^169\.254\./.test(h)) return true;
+  }
+  if (ipVersion === 6) {
+    // Loopback ::1
+    if (h === "::1") return true;
+    // Link-local fe80::/10
+    if (/^fe[89ab]/i.test(h)) return true;
+    // ULA fc00::/7 (fc and fd prefixes)
+    if (/^f[cd]/i.test(h)) return true;
+  }
+  return false;
+}
+
 async function probeInviteResolutionTarget(
   url: URL,
   timeoutMs: number
 ): Promise<InviteResolutionProbe> {
+  if (isPrivateHost(url.hostname)) {
+    throw badRequest("Cannot probe private or internal addresses");
+  }
   const startedAt = Date.now();
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -1906,11 +1938,13 @@ export function accessRoutes(
     return company?.name ?? null;
   }
 
-  router.get("/skills/available", (_req, res) => {
+  router.get("/skills/available", (req, res) => {
+    if (req.actor.type === "none") throw unauthorized();
     res.json({ skills: listAvailableSkills() });
   });
 
-  router.get("/skills/index", (_req, res) => {
+  router.get("/skills/index", (req, res) => {
+    if (req.actor.type === "none") throw unauthorized();
     res.json({
       skills: [
         { name: "paperclip", path: "/api/skills/paperclip" },
@@ -1927,6 +1961,7 @@ export function accessRoutes(
   });
 
   router.get("/skills/:skillName", (req, res) => {
+    if (req.actor.type === "none") throw unauthorized();
     const skillName = (req.params.skillName as string).trim().toLowerCase();
     const markdown = readSkillMarkdown(skillName);
     if (!markdown) throw notFound("Skill not found");

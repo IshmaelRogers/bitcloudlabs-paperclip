@@ -2,12 +2,15 @@ import express, { Router, type Request as ExpressRequest } from "express";
 import path from "node:path";
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";
+import helmet from "helmet";
+import cors from "cors";
 import type { Db } from "@paperclipai/db";
 import type { DeploymentExposure, DeploymentMode } from "@paperclipai/shared";
 import type { StorageService } from "./storage/types.js";
 import { httpLogger, errorHandler } from "./middleware/index.js";
 import { actorMiddleware } from "./middleware/auth.js";
 import { boardMutationGuard } from "./middleware/board-mutation-guard.js";
+import { authRateLimit, publicWebhookRateLimit, defaultRateLimit } from "./middleware/rate-limit.js";
 import { privateHostnameGuard, resolvePrivateHostnameAllowSet } from "./middleware/private-hostname-guard.js";
 import { healthRoutes } from "./routes/health.js";
 import { companyRoutes } from "./routes/companies.js";
@@ -66,6 +69,7 @@ export async function createApp(
     deploymentMode: DeploymentMode;
     deploymentExposure: DeploymentExposure;
     allowedHostnames: string[];
+    allowedOrigins?: string[];
     bindHost: string;
     authReady: boolean;
     companyDeletionEnabled: boolean;
@@ -78,9 +82,54 @@ export async function createApp(
 ) {
   const app = express();
 
+  // Trust the first proxy hop so that req.ip reflects the real client IP
+  // when running behind a reverse proxy.
+  app.set("trust proxy", 1);
+
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          defaultSrc: ["'self'"],
+          scriptSrc: ["'self'"],
+          styleSrc: ["'self'", "'unsafe-inline'"],
+          imgSrc: ["'self'", "data:", "blob:"],
+          connectSrc: ["'self'", "wss:"],
+          frameAncestors: ["'none'"],
+        },
+      },
+      frameguard: { action: "deny" },
+      noSniff: true,
+      referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+    }),
+  );
+
+  const effectiveAllowedOrigins = (opts.allowedOrigins ?? []).filter((origin) => {
+    // Only allow exact http(s) origins — reject wildcards or non-URL values.
+    try {
+      const parsed = new URL(origin);
+      return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.hostname !== "*";
+    } catch {
+      return false;
+    }
+  });
+  if (effectiveAllowedOrigins.length > 0) {
+    const corsOptions: cors.CorsOptions = {
+      origin: effectiveAllowedOrigins,
+      credentials: true,
+    };
+    app.options("*", cors(corsOptions));
+    app.use(cors(corsOptions));
+  }
+
+  app.use("/api/auth/", authRateLimit);
+  app.use("/api/invites/", publicWebhookRateLimit);
+  app.use("/api/routine-triggers/public/", publicWebhookRateLimit);
+  app.use("/api/", defaultRateLimit);
+
   app.use(express.json({
-    // Company import/export payloads can inline full portable packages.
-    limit: "10mb",
+    // Default limit is 1mb; the company import route applies a higher limit inline.
+    limit: "1mb",
     verify: (req, _res, buf) => {
       (req as unknown as { rawBody: Buffer }).rawBody = buf;
     },
